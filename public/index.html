@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backtrader Studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%234f8cff%22/%3E%3Cpath d=%22M6 22l7-7 5 4 8-10%22 stroke=%22white%22 stroke-width=%223%22 fill=%22none%22/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/vendor/cm/lib/codemirror.css">
+  <link rel="stylesheet" href="/vendor/cm/theme/material-darker.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">bt</span> Backtrader Studio</div>
+    <nav class="tabs" id="mainTabs">
+      <button data-view="strategies" class="active">Strategies</button>
+      <button data-view="backtest">Backtest</button>
+      <button data-view="history">History</button>
+    </nav>
+    <div class="env" id="envInfo"></div>
+  </header>
+
+  <!-- ============================== STRATEGIES ============================== -->
+  <main id="view-strategies" class="view">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <h3>Strategies</h3>
+        <button class="btn small primary" id="btnNewStrategy">+ New</button>
+      </div>
+      <ul id="strategyList" class="list"></ul>
+    </aside>
+    <section class="editor-pane">
+      <div class="toolbar">
+        <div class="file-title"><span id="editorName">—</span><span id="dirtyMark" class="dirty" hidden>●</span></div>
+        <div class="spacer"></div>
+        <button class="btn" id="btnRename" disabled>Rename</button>
+        <button class="btn" id="btnDuplicate" disabled>Duplicate</button>
+        <button class="btn danger" id="btnDelete" disabled>Delete</button>
+        <button class="btn primary" id="btnSave" disabled title="Ctrl+S">Save</button>
+        <button class="btn accent" id="btnToBacktest" disabled>Backtest →</button>
+      </div>
+      <div class="editor-wrap"><textarea id="codeEditor"></textarea></div>
+      <div class="inspect" id="inspectPanel"><p class="muted">Select or create a strategy.</p></div>
+    </section>
+  </main>
+
+  <!-- ============================== BACKTEST ============================== -->
+  <main id="view-backtest" class="view" hidden>
+    <aside class="config">
+      <form id="btForm" autocomplete="off">
+        <fieldset>
+          <legend>Strategy</legend>
+          <label>File <select id="fStrategy"></select></label>
+          <label id="fClassWrap" hidden>Class <select id="fClass"></select></label>
+          <div id="fParams" class="params"></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Data feed</legend>
+          <div class="seg" id="feedType">
+            <button type="button" data-type="file" class="active">Local file</button>
+            <button type="button" data-type="yahoo">Yahoo</button>
+            <button type="button" data-type="upload">Upload</button>
+          </div>
+          <div data-feed="file">
+            <input type="search" id="feedFilter" placeholder="Filter files…">
+            <div id="feedList" class="feed-list"></div>
+          </div>
+          <div data-feed="yahoo" hidden>
+            <label>Ticker <input id="fTicker" value="AAPL" placeholder="e.g. AAPL, MSFT, ^GSPC"></label>
+            <label>Interval
+              <select id="fInterval">
+                <option value="1d">Daily</option>
+                <option value="1wk">Weekly</option>
+                <option value="1mo">Monthly</option>
+                <option value="1h">Hourly (last 730 days)</option>
+              </select>
+            </label>
+          </div>
+          <div data-feed="upload" hidden>
+            <p class="hint">CSV with a <code>Date</code> (or <code>Datetime</code> / <code>Date,Time</code>) column plus <code>Open, High, Low, Close</code> and optional <code>Volume</code>.</p>
+            <input type="file" id="fUpload" accept=".csv,.txt">
+          </div>
+          <div class="row2">
+            <label>From <input type="date" id="fFrom"></label>
+            <label>To <input type="date" id="fTo"></label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Broker</legend>
+          <div class="row2">
+            <label>Cash <input type="number" id="fCash" value="100000" min="1" step="any"></label>
+            <label>Commission % <input type="number" id="fComm" value="0.1" min="0" step="any"></label>
+          </div>
+          <div class="row2">
+            <label>Slippage % <input type="number" id="fSlip" value="0" min="0" step="any"></label>
+            <label class="check"><input type="checkbox" id="fCoc"> Cheat-on-close</label>
+          </div>
+          <div class="row2">
+            <label>Sizer
+              <select id="fSizer">
+                <option value="percent">% of cash</option>
+                <option value="fixed">Fixed units</option>
+              </select>
+            </label>
+            <label><span id="fSizerLabel">Percent</span> <input type="number" id="fSizerVal" value="95" min="0" step="any"></label>
+          </div>
+        </fieldset>
+
+        <button type="submit" class="btn primary run" id="btnRun">▶ Run backtest</button>
+      </form>
+    </aside>
+
+    <section class="results" id="results">
+      <div class="empty" id="resultsEmpty">
+        <h2>No backtest yet</h2>
+        <p class="muted">Pick a strategy and a data feed, then press <b>Run backtest</b>.</p>
+      </div>
+      <div id="resultsBody" hidden>
+        <div class="result-head">
+          <div>
+            <h2 id="rTitle"></h2>
+            <div class="muted" id="rSub"></div>
+          </div>
+        </div>
+        <div class="error-box" id="rError" hidden></div>
+        <div class="metrics" id="rMetrics"></div>
+        <div class="chart-card">
+          <div class="chart-title">Price <span class="legend" id="priceLegend"></span></div>
+          <div id="priceChart" class="chart tall"></div>
+        </div>
+        <div id="subCharts"></div>
+        <div class="chart-card">
+          <div class="chart-title">Equity
+            <span class="legend"><i style="background:var(--accent)"></i>Strategy <i style="background:#9aa3b5"></i>Buy &amp; hold</span>
+          </div>
+          <div id="equityChart" class="chart"></div>
+        </div>
+        <div class="card">
+          <nav class="subtabs" id="detailTabs">
+            <button data-tab="trades" class="active">Trades</button>
+            <button data-tab="orders">Orders</button>
+            <button data-tab="log">Log</button>
+          </nav>
+          <div data-tabpane="trades" class="table-wrap"></div>
+          <div data-tabpane="orders" class="table-wrap" hidden></div>
+          <div data-tabpane="log" hidden><pre id="rLog" class="log"></pre></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============================== HISTORY ============================== -->
+  <main id="view-history" class="view single" hidden>
+    <section class="card">
+      <div class="sidebar-head"><h3>Backtest history</h3><button class="btn small" id="btnRefreshRuns">Refresh</button></div>
+      <div class="table-wrap" id="runsTable"></div>
+    </section>
+  </main>
+
+  <dialog id="nameDialog">
+    <form method="dialog" id="nameForm">
+      <h3 id="nameDialogTitle">New strategy</h3>
+      <label>File name (Python identifier)<input id="nameInput" required pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64"></label>
+      <p class="hint" id="nameHint"></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="nameCancel">Cancel</button>
+        <button type="submit" class="btn primary" value="ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirmDialog">
+    <form method="dialog">
+      <p id="confirmText"></p>
+      <div class="dialog-actions">
+        <button class="btn" value="cancel">Cancel</button>
+        <button class="btn danger" value="ok">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/vendor/cm/lib/codemirror.js"></script>
+  <script src="/vendor/cm/mode/python/python.js"></script>
+  <script src="/vendor/cm/addon/edit/matchbrackets.js"></script>
+  <script src="/vendor/lwc/lightweight-charts.standalone.production.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

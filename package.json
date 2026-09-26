@@ -1,0 +1,17 @@
+{
+  "name": "backtrader-ui",
+  "version": "1.0.0",
+  "description": "Web UI to write, manage and backtest backtrader strategies",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "codemirror": "^5.65.21",
+    "express": "^4.22.3",
+    "lightweight-charts": "^4.2.3"
+  },
+  "private": true
+}
