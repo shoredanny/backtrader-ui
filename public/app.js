@@ -45,6 +45,7 @@ const state = {
   feeds: [],
   feedType: 'file',
   feedId: null,
+  formStrategy: null,   // strategy whose defaults the backtest form shows
   charts: [],
   lastResult: null,
 };
@@ -158,15 +159,58 @@ async function loadStrategies() {
   renderStrategyList();
 }
 
-function renderStrategyList() {
-  const ul = $('#strategyList');
-  ul.innerHTML = state.strategies.map((s) => `
-    <li data-name="${esc(s.name)}" class="${s.name === state.current ? 'active' : ''}">
-      <span>${esc(s.name)}.py</span><span class="time">${relTime(s.modified)}</span>
-    </li>`).join('') || '<li class="muted">No strategies yet</li>';
+// Folders the user opened in the tree (remembered per browser)
+function loadPref(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
 }
+function savePref(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
+}
+const expanded = new Set(loadPref('expandedFolders', []));
+
+const folderOf = (name) => (name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : '');
+const baseOf = (name) => name.slice(name.lastIndexOf('/') + 1);
+
+function renderStrategyList() {
+  const q = $('#strategyFilter').value.trim().toLowerCase();
+  const match = (s) => !q || s.name.toLowerCase().includes(q)
+    || s.classes.some((c) => c.toLowerCase().includes(q)) || (s.summary || '').toLowerCase().includes(q);
+  const groups = new Map();
+  state.strategies.filter(match).forEach((s) => {
+    const folder = folderOf(s.name);
+    if (!groups.has(folder)) groups.set(folder, []);
+    groups.get(folder).push(s);
+  });
+  const fileLi = (s, nested) => {
+    const helper = s.ok && !s.classes.length;
+    const title = !s.ok ? 'Failed to load: open it to see the error'
+      : helper ? 'Helper module imported by other strategies (no strategy class)'
+        : `${s.classes.join(', ')}${s.summary ? ` — ${s.summary}` : ''}`;
+    return `<li data-name="${esc(s.name)}" title="${esc(title)}"
+      class="file${nested ? ' nested' : ''}${helper ? ' helper' : ''}${s.name === state.current ? ' active' : ''}">
+      <span>${esc(baseOf(s.name))}.py${s.ok ? '' : ' <span class="err">●</span>'}</span>
+      <span class="time">${relTime(s.modified)}</span></li>`;
+  };
+  let html = (groups.get('') || []).map((s) => fileLi(s, false)).join('');
+  [...groups.keys()].filter(Boolean).sort().forEach((folder) => {
+    const open = !!q || expanded.has(folder) || (state.current || '').startsWith(`${folder}/`);
+    html += `<li class="folder${open ? ' open' : ''}" data-folder="${esc(folder)}">
+      <span class="caret">▸</span>${esc(folder)}<span class="count">${groups.get(folder).length}</span></li>`;
+    if (open) html += groups.get(folder).map((s) => fileLi(s, true)).join('');
+  });
+  $('#strategyList').innerHTML = html || '<li class="muted">No strategies</li>';
+}
+$('#strategyFilter').addEventListener('input', renderStrategyList);
 
 $('#strategyList').addEventListener('click', async (e) => {
+  const folder = e.target.closest('li[data-folder]');
+  if (folder) {
+    const f = folder.dataset.folder;
+    if (folder.classList.contains('open')) expanded.delete(f); else expanded.add(f);
+    savePref('expandedFolders', [...expanded]);
+    renderStrategyList();
+    return;
+  }
   const li = e.target.closest('li[data-name]');
   if (!li || li.dataset.name === state.current) return;
   if (isDirty() && !(await confirmBox(`Discard unsaved changes to ${state.current}.py?`))) return;
@@ -192,22 +236,36 @@ async function openStrategy(name) {
   }
 }
 
+function fmtValue(v) {
+  return typeof v === 'string' ? v : JSON.stringify(v);
+}
+const pill = (k, v) => `<span class="pill">${esc(k)} = <b>${esc(fmtValue(v))}</b></span>`;
+
 function renderInspect(info) {
   const p = $('#inspectPanel');
   if (!info.ok) {
     p.innerHTML = `<h3 style="margin-bottom:8px">Strategy failed to load</h3><pre class="err">${esc(info.error)}</pre>`;
     return;
   }
+  const parts = [];
+  if (info.doc) parts.push(`<p class="moddoc">${esc(info.doc)}</p>`);
   if (!info.classes.length) {
-    p.innerHTML = '<p class="muted">No <code>bt.Strategy</code> subclass found in this file.</p>';
-    return;
+    parts.push('<p class="muted">No <code>bt.Strategy</code> subclass in this file (a helper module imported by other strategies).</p>');
   }
-  p.innerHTML = info.classes.map((c) => `
+  info.classes.forEach((c) => parts.push(`
     <div class="cls">
       <h3>class ${esc(c.name)}</h3>
       ${c.doc ? `<div class="doc">${esc(c.doc)}</div>` : ''}
-      <div>${c.params.map((pr) => `<span class="pill">${esc(pr.name)} = <b>${esc(JSON.stringify(pr.default))}</b></span>`).join('') || '<span class="muted">No params</span>'}</div>
-    </div>`).join('');
+      <div>${c.params.map((pr) => pill(pr.name, pr.default)).join('') || '<span class="muted">No params</span>'}</div>
+    </div>`));
+  if (info.options?.length) {
+    parts.push(`<h4>Sample options</h4><div>${info.options.map((o) => pill(o.name, o.default)).join('')}</div>`);
+  }
+  const d = info.defaults || {};
+  if (Object.keys(d).length) {
+    parts.push(`<h4>Backtest defaults</h4><div>${Object.entries(d).map(([k, v]) => pill(k, v)).join('')}</div>`);
+  }
+  p.innerHTML = parts.join('');
 }
 
 async function saveStrategy() {
@@ -236,7 +294,9 @@ async function createStrategy(name, code) {
 
 $('#btnNewStrategy').addEventListener('click', async () => {
   if (isDirty() && !(await confirmBox(`Discard unsaved changes to ${state.current}.py?`))) return;
-  const name = await askName('New strategy', 'my_strategy', 'Saved as strategies/<name>.py and pre-filled with a template.');
+  const folder = state.current ? folderOf(state.current) : '';
+  const name = await askName('New strategy', folder ? `${folder}/my_strategy` : 'my_strategy',
+    'Saved as strategies/<name>.py (use "/" for a folder) and pre-filled with a template.');
   if (!name) return;
   try { await createStrategy(name, NEW_STRATEGY_TEMPLATE); } catch (err) { toast(err.message, true); }
 });
@@ -291,8 +351,19 @@ async function syncBacktestStrategies() {
   const sel = $('#fStrategy');
   const want = sel.dataset.want || sel.value || state.current;
   delete sel.dataset.want;
-  sel.innerHTML = state.strategies.map((s) => `<option value="${esc(s.name)}">${esc(s.name)}.py</option>`).join('');
-  if (want && state.strategies.some((s) => s.name === want)) sel.value = want;
+  // helper modules (no strategy class) cannot be run
+  const runnable = state.strategies.filter((s) => !s.ok || s.classes.length);
+  const opt = (s) => `<option value="${esc(s.name)}">${esc(baseOf(s.name))}.py${s.classes.length > 1 ? ` (${s.classes.length} classes)` : ''}</option>`;
+  const groups = new Map();
+  runnable.forEach((s) => {
+    const f = folderOf(s.name);
+    if (!groups.has(f)) groups.set(f, []);
+    groups.get(f).push(s);
+  });
+  sel.innerHTML = (groups.get('') || []).map(opt).join('')
+    + [...groups.keys()].filter(Boolean).sort()
+      .map((f) => `<optgroup label="${esc(f)}">${groups.get(f).map(opt).join('')}</optgroup>`).join('');
+  if (want && runnable.some((s) => s.name === want)) sel.value = want;
   await onStrategyChange();
 }
 
@@ -303,35 +374,82 @@ async function getInspect(name, fresh = false) {
   return s;
 }
 
-async function onStrategyChange() {
+// Render the strategy section of the form. Choosing another strategy applies
+// its DEFAULTS; re-rendering the same one keeps what the user typed;
+// opts.values (from a saved run) wins over both.
+async function onStrategyChange(opts = {}) {
   const name = $('#fStrategy').value;
   const paramsBox = $('#fParams');
-  if (!name) { paramsBox.innerHTML = '<p class="hint">Create a strategy first.</p>'; return; }
+  const docEl = $('#fStrategyDoc');
+  if (!name) {
+    paramsBox.innerHTML = '<p class="hint">Create a strategy first.</p>';
+    return;
+  }
+  const kept = name === state.formStrategy && !opts.values
+    ? { cls: $('#fClass').value, params: collectFields('#fParams'), options: collectFields('#fOptions') }
+    : null;
   paramsBox.innerHTML = '<p class="hint">Loading…</p>';
   try {
     const info = await getInspect(name, true);
+    state.formStrategy = name;
+    docEl.textContent = (info.doc || '').split(/\n\s*\n/)[0];
+    docEl.hidden = !info.doc;
     if (!info.ok) {
       $('#fClassWrap').hidden = true;
+      $('#fOptionsWrap').hidden = true;
       paramsBox.innerHTML = '<p class="hint neg">This strategy has errors. Fix it in the Strategies tab.</p>';
       return;
     }
+    const d = info.defaults || {};
+    const v = opts.values || kept || { cls: d.strategy, params: d.params || {}, options: {} };
     const classSel = $('#fClass');
-    const prev = classSel.value;
     classSel.innerHTML = info.classes.map((c) => `<option>${esc(c.name)}</option>`).join('');
-    if (info.classes.some((c) => c.name === prev)) classSel.value = prev;
+    if (info.classes.some((c) => c.name === v.cls)) classSel.value = v.cls;
     $('#fClassWrap').hidden = info.classes.length < 2;
-    renderParams();
+    renderParams(v.params);
+    renderOptions(v.options);
+    if (!opts.values && !kept) applyFormDefaults(d);
   } catch (err) {
     paramsBox.innerHTML = `<p class="hint neg">${esc(err.message)}</p>`;
   }
 }
-$('#fStrategy').addEventListener('change', onStrategyChange);
-$('#fClass').addEventListener('change', renderParams);
+$('#fStrategy').addEventListener('change', () => onStrategyChange());
+$('#fClass').addEventListener('change', () => {
+  renderParams(state.inspectCache[$('#fStrategy').value]?.defaults?.params || {});
+});
+
+function currentInfo() {
+  const info = state.inspectCache[$('#fStrategy').value];
+  return info?.ok ? info : null;
+}
 
 function currentClass() {
-  const info = state.inspectCache[$('#fStrategy').value];
-  if (!info?.ok) return null;
+  const info = currentInfo();
+  if (!info) return null;
   return info.classes.find((c) => c.name === $('#fClass').value) || info.classes[0];
+}
+
+// One form field for a param/option described by the runner
+function fieldHtml(f, value, choices) {
+  const name = esc(f.name);
+  const v = value === undefined ? f.default : value;
+  const shown = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+  const list = choices?.[f.name];
+  if (list) {
+    const vals = list.map(String);
+    if (!vals.includes(shown)) vals.unshift(shown);
+    return `<label>${name}<select data-field="${name}">${vals.map((c) =>
+      `<option value="${esc(c)}"${c === shown ? ' selected' : ''}>${esc(c === '' ? '(none)' : c)}</option>`).join('')}</select></label>`;
+  }
+  if (f.type === 'bool') {
+    return `<label class="check"><input type="checkbox" data-field="${name}"${v === true || v === 'true' ? ' checked' : ''}> ${name}</label>`;
+  }
+  if (f.type === 'int' || f.type === 'float') {
+    return `<label>${name}<input data-field="${name}" type="number" step="${f.type === 'int' ? 1 : 'any'}" value="${esc(shown)}"></label>`;
+  }
+  const extra = f.type === 'expr' ? ' class="expr" title="Python expression (bt, datetime and the module names are available)"'
+    : f.type === 'none' ? ' placeholder="None"' : '';
+  return `<label>${name}<input data-field="${name}" type="text"${extra} value="${esc(shown)}"></label>`;
 }
 
 function renderParams(values = {}) {
@@ -339,24 +457,55 @@ function renderParams(values = {}) {
   const box = $('#fParams');
   if (!cls) { box.innerHTML = ''; return; }
   if (!cls.params.length) { box.innerHTML = '<p class="hint">No parameters.</p>'; return; }
-  box.innerHTML = cls.params.map((p) => {
-    const v = values[p.name] ?? p.default;
-    if (p.type === 'bool') {
-      return `<label class="check"><input type="checkbox" data-param="${esc(p.name)}" ${v ? 'checked' : ''}> ${esc(p.name)}</label>`;
-    }
-    const isNum = p.type === 'int' || p.type === 'float';
-    return `<label>${esc(p.name)}
-      <input data-param="${esc(p.name)}" ${isNum ? `type="number" step="${p.type === 'int' ? 1 : 'any'}"` : 'type="text"'}
-        value="${esc(v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : v)}"></label>`;
-  }).join('');
+  const choices = currentInfo()?.choices || {};
+  box.innerHTML = cls.params.map((p) => fieldHtml(p, values[p.name], choices)).join('');
 }
 
-function collectParams() {
+function renderOptions(values = {}) {
+  const info = currentInfo();
+  const options = info?.options || [];
+  $('#fOptionsWrap').hidden = !options.length;
+  $('#fOptions').innerHTML = options.map((o) => fieldHtml(o, values[o.name], info.choices || {})).join('');
+}
+
+function collectFields(sel) {
   const out = {};
-  $$('#fParams [data-param]').forEach((el) => {
-    out[el.dataset.param] = el.type === 'checkbox' ? el.checked : el.value;
+  $$(`${sel} [data-field]`).forEach((el) => {
+    out[el.dataset.field] = el.type === 'checkbox' ? el.checked : el.value;
   });
   return out;
+}
+
+// Apply a strategy's DEFAULTS (feed, dates, broker, sizer) to the form
+function applyFormDefaults(d) {
+  if (!d || !Object.keys(d).length) return;
+  if (d.feed) {
+    if (d.feed.startsWith('yahoo:')) {
+      const [, ticker, interval] = d.feed.split(':');
+      setFeedType('yahoo');
+      $('#fTicker').value = ticker;
+      $('#fInterval').value = interval || '1d';
+    } else {
+      const f = state.feeds.find((x) => x.file === d.feed && x.usable);
+      if (f) {
+        setFeedType('file');
+        $('#feedFilter').value = '';
+        selectFeed(f.id, false);
+        $('.feed-item.active')?.scrollIntoView({ block: 'nearest' });
+      }
+    }
+  }
+  if ('fromdate' in d) $('#fFrom').value = d.fromdate || '';
+  if ('todate' in d) $('#fTo').value = d.todate || '';
+  if (d.cash !== undefined) $('#fCash').value = d.cash;
+  if (d.commission !== undefined) $('#fComm').value = d.commission;
+  if (d.slippage !== undefined) $('#fSlip').value = d.slippage;
+  if (d.coc !== undefined) $('#fCoc').checked = !!d.coc;
+  if (d.sizer) {
+    $('#fSizer').value = d.sizer.type === 'percent' ? 'percent' : 'fixed';
+    $('#fSizerLabel').textContent = $('#fSizer').value === 'percent' ? 'Percent' : 'Units';
+    $('#fSizerVal').value = d.sizer.value;
+  }
 }
 
 // ---- data feeds
@@ -457,7 +606,8 @@ function buildRequest() {
   return {
     strategy: $('#fStrategy').value,
     strategyClass: currentClass()?.name,
-    params: collectParams(),
+    params: collectFields('#fParams'),
+    options: collectFields('#fOptions'),
     feed,
     fromdate: $('#fFrom').value || null,
     todate: $('#fTo').value || null,
@@ -542,8 +692,10 @@ function renderResult(r) {
   const req = r.request || {};
   const paramsTxt = Object.entries(r.params || req.params || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
   $('#rTitle').textContent = `${r.strategy || req.strategyClass || req.strategy}${paramsTxt ? ` (${paramsTxt})` : ''}`;
-  $('#rSub').textContent = [req.feedLabel, [req.fromdate, req.todate].filter(Boolean).join(' → '),
-    r.createdAt && new Date(r.createdAt).toLocaleString()].filter(Boolean).join(' · ');
+  const optsTxt = Object.entries(r.options || {}).map(([k, v]) => `${k}=${fmtValue(v)}`).join(', ');
+  $('#rSub').textContent = [req.strategy && `${req.strategy}.py`, req.feedLabel,
+    [req.fromdate, req.todate].filter(Boolean).join(' → '),
+    r.createdAt && new Date(r.createdAt).toLocaleString(), optsTxt && `options: ${optsTxt}`].filter(Boolean).join(' · ');
 
   clearCharts();
   const err = $('#rError');
@@ -582,14 +734,19 @@ function renderResult(r) {
   const candles = price.addCandlestickSeries({
     upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350',
   });
-  candles.setData(r.bars.map(({ time, open, high, low, close }) => ({ time, open, high, low, close })));
+  // bars without prices (e.g. filler bars with NaN) become whitespace
+  const priced = (b) => [b.open, b.high, b.low, b.close].every((x) => x !== null && x !== undefined);
+  candles.setData(r.bars.map((b) => (priced(b)
+    ? { time: b.time, open: b.open, high: b.high, low: b.low, close: b.close } : { time: b.time })));
   if (r.bars.some((b) => b.volume > 0)) {
     const vol = price.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', lastValueVisible: false, priceLineVisible: false });
     price.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-    vol.setData(r.bars.map((b) => ({ time: b.time, value: b.volume, color: b.close >= b.open ? 'rgba(38,166,154,.35)' : 'rgba(239,83,80,.35)' })));
+    vol.setData(r.bars.map((b) => (b.volume === null ? { time: b.time }
+      : { time: b.time, value: b.volume, color: b.close >= b.open ? 'rgba(38,166,154,.35)' : 'rgba(239,83,80,.35)' })));
   }
 
-  const markers = r.orders.filter((o) => o.status === 'Completed').map((o) => ({
+  // markers only for orders on the charted (first) data
+  const markers = r.orders.filter((o) => ['Completed', 'Partial'].includes(o.status) && o.main !== false).map((o) => ({
     time: o.time,
     position: o.side === 'BUY' ? 'belowBar' : 'aboveBar',
     color: o.side === 'BUY' ? '#26a69a' : '#ef5350',
@@ -607,14 +764,19 @@ function renderResult(r) {
     if (!ind.overlay) {
       const card = document.createElement('div');
       card.className = 'chart-card';
-      card.innerHTML = `<div class="chart-title">${esc(ind.name)} <span class="legend"></span></div><div class="chart sub"></div>`;
+      const kind = ind.kind ? `<span class="muted">${ind.kind}</span> ` : '';
+      card.innerHTML = `<div class="chart-title">${kind}${esc(ind.name)} <span class="legend"></span></div><div class="chart sub"></div>`;
       $('#subCharts').appendChild(card);
       chart = makeChart($('.chart', card), intraday);
       ind._legend = $('.legend', card);
     }
     ind.lines.forEach((ln) => {
       const color = SERIES_COLORS[colorIdx++ % SERIES_COLORS.length];
-      const s = chart.addLineSeries({ color, lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+      // sparse lines (e.g. observers marking events) are drawn as dots
+      const s = chart.addLineSeries({
+        color, lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+        ...(ln.sparse ? { lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: 3 } : {}),
+      });
       s.setData(padToBars(r.bars, ln.data));
       const text = ind.overlay ? (ind.lines.length > 1 ? `${ind.name} ${ln.name}` : ind.name) : ln.name;
       const label = `<span><i style="background:${color}"></i>${esc(text)}</span>`;
@@ -641,34 +803,49 @@ function renderResult(r) {
   // ---- tables
   renderTrades(r, intraday);
   renderOrders(r, intraday);
+  renderAnalyzers(r);
   $('#rLog').textContent = r.log ? r.log + (r.logTruncated ? '\n… (truncated)' : '') : '(no output — use print() in your strategy to log here)';
   showDetailTab('trades');
 }
 
+const multiData = (r) => [...r.orders, ...r.trades].some((x) => x.data && x.data !== r.mainData);
+
 function renderTrades(r, intraday) {
+  const md = multiData(r);
   const rows = r.trades.map((t, i) => `
     <tr class="click" data-from="${t.opened || ''}" data-to="${t.closed || ''}">
-      <td>${i + 1}</td><td class="l">${t.direction || ''}</td>
+      <td>${i + 1}</td>${md ? `<td class="l">${esc(t.data)}</td>` : ''}<td class="l">${t.direction || ''}</td>
       <td class="l">${fmtTime(t.opened, intraday)}</td><td class="l">${t.closed ? fmtTime(t.closed, intraday) : '<span class="muted">open</span>'}</td>
       <td>${t.bars ?? '—'}</td><td>${fmtNum(t.size, 0)}</td><td>${fmtNum(t.price)}</td>
       <td class="${signCls(t.pnl)}">${fmtNum(t.pnl)}</td><td class="${signCls(t.pnlcomm)}">${fmtNum(t.pnlcomm)}</td>
     </tr>`).join('');
   $('[data-tabpane=trades]').innerHTML = r.trades.length ? `
-    <table><thead><tr><th>#</th><th class="l">Dir</th><th class="l">Opened</th><th class="l">Closed</th><th>Bars</th>
+    <table><thead><tr><th>#</th>${md ? '<th class="l">Data</th>' : ''}<th class="l">Dir</th><th class="l">Opened</th><th class="l">Closed</th><th>Bars</th>
     <th>Size</th><th>Entry</th><th>P&amp;L</th><th>P&amp;L net</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="hint">Click a trade to zoom the charts to it.</p>`
     : '<p class="muted">No trades were made.</p>';
 }
 
 function renderOrders(r, intraday) {
+  const md = multiData(r);
   const rows = r.orders.map((o) => `
-    <tr><td>${o.ref}</td><td class="l ${o.side === 'BUY' ? 'pos' : 'neg'}">${o.side}</td><td class="l">${esc(o.type)}</td>
+    <tr><td>${o.ref}</td>${md ? `<td class="l">${esc(o.data)}</td>` : ''}<td class="l ${o.side === 'BUY' ? 'pos' : 'neg'}">${o.side}</td><td class="l">${esc(o.type)}</td>
       <td class="l">${esc(o.status)}</td><td class="l">${fmtTime(o.created, intraday)}</td><td class="l">${fmtTime(o.time, intraday)}</td>
       <td>${fmtNum(o.size, 0)}</td><td>${fmtNum(o.price)}</td><td>${fmtNum(o.value)}</td><td>${fmtNum(o.comm)}</td></tr>`).join('');
   $('[data-tabpane=orders]').innerHTML = r.orders.length ? `
-    <table><thead><tr><th>Ref</th><th class="l">Side</th><th class="l">Type</th><th class="l">Status</th><th class="l">Created</th>
+    <table><thead><tr><th>Ref</th>${md ? '<th class="l">Data</th>' : ''}<th class="l">Side</th><th class="l">Type</th><th class="l">Status</th><th class="l">Created</th>
     <th class="l">Executed</th><th>Size</th><th>Price</th><th>Value</th><th>Comm</th></tr></thead><tbody>${rows}</tbody></table>`
     : '<p class="muted">No orders.</p>';
+}
+
+// Analyzers added by the strategy file (the metric tiles use the UI's own)
+function renderAnalyzers(r) {
+  const list = r.analyzers || [];
+  $('#tabAnalyzers').textContent = list.length ? `Analyzers (${list.length})` : 'Analyzers';
+  $('[data-tabpane=analyzers]').innerHTML = list.length
+    ? list.map((a) => `<div class="an-block"><h4>${esc(a.name)} <span>${esc(a.type)}</span></h4>
+        <pre class="json">${esc(JSON.stringify(a.analysis, null, 2))}</pre></div>`).join('')
+    : '<p class="muted">This strategy file adds no analyzers (the figures above come from the built-in ones).</p>';
 }
 
 $('[data-tabpane=trades]').addEventListener('click', (e) => {
@@ -747,9 +924,7 @@ async function applyRequest(req) {
     return;
   }
   $('#fStrategy').value = req.strategy;
-  await onStrategyChange();
-  if (req.strategyClass) $('#fClass').value = req.strategyClass;
-  renderParams(req.params || {});
+  await onStrategyChange({ values: { cls: req.strategyClass, params: req.params || {}, options: req.options || {} } });
   if (req.feed?.type === 'yahoo') {
     setFeedType('yahoo');
     $('#fTicker').value = req.feed.ticker;
@@ -776,7 +951,8 @@ async function applyRequest(req) {
     $('#envInfo').textContent = `backtrader: ${cfg.btRoot}`;
     $('#envInfo').title = `python: ${cfg.python}`;
     await Promise.all([loadStrategies(), loadFeeds()]);
-    if (state.strategies.length) openStrategy(state.strategies[0].name);
+    const first = state.strategies.find((x) => !x.name.includes('/')) || state.strategies[0];
+    if (first) openStrategy(first.name);
     const def = state.feeds.find((f) => f.file === 'orcl-1995-2014.txt') || state.feeds.find((f) => f.usable);
     if (def) {
       selectFeed(def.id);

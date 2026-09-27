@@ -34,7 +34,9 @@ app.use('/vendor/lwc', express.static(path.join(ROOT, 'node_modules', 'lightweig
 app.use('/vendor/cm', express.static(path.join(ROOT, 'node_modules', 'codemirror')));
 
 // ---------------------------------------------------------------- helpers
-const SAFE_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+// Strategy names are paths relative to strategies/ without ".py", e.g.
+// "bracket/bracket" or "sma_cross". Each segment: letters, digits, _ . -
+const SAFE_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
 const SAFE_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 function httpError(status, message) {
@@ -44,8 +46,11 @@ function httpError(status, message) {
 }
 
 function strategyPath(name) {
-  if (!SAFE_NAME.test(name)) throw httpError(400, 'Strategy name must be a valid Python identifier');
-  return path.join(STRAT_DIR, name + '.py');
+  const segs = String(name || '').split('/');
+  if (segs.length > 4 || !segs.every((s) => SAFE_SEGMENT.test(s) && !s.includes('..'))) {
+    throw httpError(400, 'Invalid strategy name: use letters, digits, _ - . and "/" for folders');
+  }
+  return path.join(STRAT_DIR, ...segs) + '.py';
 }
 
 function runPython(args, input, timeoutMs = RUN_TIMEOUT_MS) {
@@ -119,40 +124,85 @@ function resolveFeedPath(id) {
 }
 
 // ------------------------------------------------------------ strategies
-app.get('/api/strategies', wrap(async (req, res) => {
-  const files = (await fsp.readdir(STRAT_DIR)).filter((f) => f.endsWith('.py')).sort();
-  const list = await Promise.all(files.map(async (f) => {
-    const st = await fsp.stat(path.join(STRAT_DIR, f));
-    return { name: f.slice(0, -3), modified: st.mtimeMs };
+// Inspection results cached per file and mtime (inspecting imports Python)
+const inspectCache = new Map();
+
+async function walkStrategies(dir = STRAT_DIR, prefix = '') {
+  const out = [];
+  for (const ent of await fsp.readdir(dir, { withFileTypes: true })) {
+    if (ent.name.startsWith('.') || ent.name === '__pycache__') continue;
+    const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
+    if (ent.isDirectory()) out.push(...(await walkStrategies(path.join(dir, ent.name), rel)));
+    else if (ent.name.endsWith('.py')) out.push(rel.slice(0, -3));
+  }
+  return out;
+}
+
+async function inspectMany(names) {
+  const entries = await Promise.all(names.map(async (name) => {
+    const p = strategyPath(name);
+    return { name, p, mtime: (await fsp.stat(p)).mtimeMs };
   }));
-  res.json(list);
+  const stale = entries.filter((e) => inspectCache.get(e.p)?.mtime !== e.mtime);
+  // inspect in chunks so one bad import cannot take the whole list down
+  for (let i = 0; i < stale.length; i += 40) {
+    const chunk = stale.slice(i, i + 40);
+    const out = await runPython(['inspect', ...chunk.map((e) => e.p)], undefined, 120000);
+    for (const e of chunk) inspectCache.set(e.p, { mtime: e.mtime, info: out.results[e.p] });
+  }
+  return entries.map((e) => ({ ...e, info: inspectCache.get(e.p).info }));
+}
+
+app.get('/api/strategies', wrap(async (req, res) => {
+  const names = (await walkStrategies()).sort();
+  const list = await inspectMany(names);
+  res.json(list.map(({ name, mtime, info }) => ({
+    name,
+    modified: mtime,
+    ok: info.ok,
+    classes: info.ok ? info.classes.map((c) => c.name) : [],
+    summary: info.ok ? (info.doc || info.classes[0]?.doc || '').split(/\n\s*\n/)[0].replace(/\s+/g, ' ') : 'Error loading file',
+  })));
 }));
 
 app.get('/api/strategies/:name', wrap(async (req, res) => {
   const p = strategyPath(req.params.name);
   if (!fs.existsSync(p)) throw httpError(404, 'Strategy not found');
   const code = await fsp.readFile(p, 'utf8');
-  const info = await runPython(['inspect', p], undefined, 30000);
+  const [{ info }] = await inspectMany([req.params.name]);
   res.json({ name: req.params.name, code, ...info });
 }));
 
-// Create (fails if exists unless overwrite) or update a strategy file
+// Create (fails if it exists and create is set) or update a strategy file
 app.put('/api/strategies/:name', wrap(async (req, res) => {
   const p = strategyPath(req.params.name);
   const { code, create } = req.body || {};
   if (typeof code !== 'string') throw httpError(400, 'Missing code');
   if (create && fs.existsSync(p)) throw httpError(409, 'A strategy with that name already exists');
+  await fsp.mkdir(path.dirname(p), { recursive: true });
   await fsp.writeFile(p, code);
-  const info = await runPython(['inspect', p], undefined, 30000);
+  const [{ info }] = await inspectMany([req.params.name]);
   res.json({ name: req.params.name, ...info });
 }));
+
+// Remove folders left empty after a rename/delete (never strategies/ itself)
+async function pruneEmptyDirs(dir) {
+  while (dir.startsWith(STRAT_DIR + path.sep)) {
+    const left = (await fsp.readdir(dir)).filter((f) => f !== '__pycache__');
+    if (left.length) return;
+    await fsp.rm(dir, { recursive: true, force: true });
+    dir = path.dirname(dir);
+  }
+}
 
 app.post('/api/strategies/:name/rename', wrap(async (req, res) => {
   const from = strategyPath(req.params.name);
   const to = strategyPath(String(req.body?.to || ''));
   if (!fs.existsSync(from)) throw httpError(404, 'Strategy not found');
   if (fs.existsSync(to)) throw httpError(409, 'Target name already exists');
+  await fsp.mkdir(path.dirname(to), { recursive: true });
   await fsp.rename(from, to);
+  await pruneEmptyDirs(path.dirname(from));
   res.json({ ok: true });
 }));
 
@@ -160,6 +210,8 @@ app.delete('/api/strategies/:name', wrap(async (req, res) => {
   const p = strategyPath(req.params.name);
   if (!fs.existsSync(p)) throw httpError(404, 'Strategy not found');
   await fsp.unlink(p);
+  inspectCache.delete(p);
+  await pruneEmptyDirs(path.dirname(p));
   res.json({ ok: true });
 }));
 
@@ -205,23 +257,27 @@ app.post('/api/backtest', wrap(async (req, res) => {
 
   let feed;
   let feedLabel;
+  let feedName;
   if (b.feed?.type === 'yahoo') {
     const ticker = String(b.feed.ticker || '').trim().toUpperCase();
     if (!/^[A-Z0-9.^=\-]{1,20}$/.test(ticker)) throw httpError(400, 'Invalid ticker');
     const interval = ['1d', '1wk', '1mo', '1h'].includes(b.feed.interval) ? b.feed.interval : '1d';
     feed = { type: 'yahoo', ticker, interval };
     feedLabel = `Yahoo: ${ticker} (${interval})`;
+    feedName = ticker;
   } else {
     feed = { type: 'file', path: resolveFeedPath(b.feed?.id) };
     feedLabel = b.feed.id;
+    feedName = path.basename(feed.path).replace(/\.[^.]+$/, '');
   }
 
   const cfg = {
     strategyFile: stratFile,
     strategyClass: b.strategyClass || null,
     params: b.params || {},
+    options: b.options || {},
     feed,
-    feedName: feedLabel,
+    feedName,
     fromdate: b.fromdate || null,
     todate: b.todate || null,
     cash: b.cash,

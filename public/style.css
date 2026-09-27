@@ -93,6 +93,23 @@ label.check { display: flex; align-items: center; margin-top: 22px; color: var(-
 .list li:hover { background: var(--panel-2); }
 .list li.active { background: #1f2a40; color: #cfe0ff; }
 .list li .time { color: var(--muted); font-family: inherit; font-size: 11px; }
+.sidebar-filter { padding: 0 12px 8px; }
+.sidebar-filter input { margin: 0; }
+.tree li.folder { font-family: inherit; font-weight: 600; font-size: 12px; color: var(--muted); padding: 6px 8px; gap: 6px; justify-content: flex-start; }
+.tree li.folder:hover { color: var(--text); }
+.tree li.folder .caret { display: inline-block; width: 10px; transition: transform .15s; }
+.tree li.folder.open .caret { transform: rotate(90deg); }
+.tree li.folder .count { margin-left: auto; font-weight: 400; font-size: 11px; }
+.tree li.file.nested { padding-left: 26px; }
+.tree li.file.helper { opacity: .55; }
+.tree li.file .err { color: var(--red); }
+.inspect .moddoc { white-space: pre-wrap; margin: 0 0 10px; color: var(--text); }
+.inspect h4 { margin: 10px 0 6px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+input.expr { font-family: var(--mono); font-size: 12px; }
+pre.json { margin: 0 0 12px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; color: #c8cdd8; }
+.an-block h4 { margin: 4px 0 6px; font-size: 13px; }
+.an-block h4 span { color: var(--muted); font-weight: 400; font-size: 12px; }
+#fStrategyDoc { white-space: pre-wrap; max-height: 9em; overflow: auto; }
 
 .editor-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }

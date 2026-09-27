@@ -27,7 +27,8 @@
         <h3>Strategies</h3>
         <button class="btn small primary" id="btnNewStrategy">+ New</button>
       </div>
-      <ul id="strategyList" class="list"></ul>
+      <div class="sidebar-filter"><input type="search" id="strategyFilter" placeholder="Filter strategies…"></div>
+      <ul id="strategyList" class="list tree"></ul>
     </aside>
     <section class="editor-pane">
       <div class="toolbar">
@@ -51,8 +52,15 @@
         <fieldset>
           <legend>Strategy</legend>
           <label>File <select id="fStrategy"></select></label>
+          <p class="hint" id="fStrategyDoc" hidden></p>
           <label id="fClassWrap" hidden>Class <select id="fClass"></select></label>
           <div id="fParams" class="params"></div>
+        </fieldset>
+
+        <fieldset id="fOptionsWrap" hidden>
+          <legend>Sample options</legend>
+          <p class="hint">Run settings used by this file's <code>configure()</code>.</p>
+          <div id="fOptions" class="params"></div>
         </fieldset>
 
         <fieldset>
@@ -141,10 +149,12 @@
           <nav class="subtabs" id="detailTabs">
             <button data-tab="trades" class="active">Trades</button>
             <button data-tab="orders">Orders</button>
+            <button data-tab="analyzers" id="tabAnalyzers">Analyzers</button>
             <button data-tab="log">Log</button>
           </nav>
           <div data-tabpane="trades" class="table-wrap"></div>
           <div data-tabpane="orders" class="table-wrap" hidden></div>
+          <div data-tabpane="analyzers" class="table-wrap" hidden></div>
           <div data-tabpane="log" hidden><pre id="rLog" class="log"></pre></div>
         </div>
       </div>
@@ -162,7 +172,7 @@
   <dialog id="nameDialog">
     <form method="dialog" id="nameForm">
       <h3 id="nameDialogTitle">New strategy</h3>
-      <label>File name (Python identifier)<input id="nameInput" required pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64"></label>
+      <label>Name (use "/" for folders, e.g. my-folder/my_strategy)<input id="nameInput" required pattern="[A-Za-z0-9_][A-Za-z0-9_.\-]*(/[A-Za-z0-9_][A-Za-z0-9_.\-]*){0,3}" maxlength="200"></label>
       <p class="hint" id="nameHint"></p>
       <div class="dialog-actions">
         <button type="button" class="btn" id="nameCancel">Cancel</button>
