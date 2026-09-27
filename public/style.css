@@ -200,3 +200,7 @@ dialog h3 { margin-bottom: 12px; }
   .editor-pane { min-height: 70vh; }
   .env { display: none; }
 }
+
+label.check.inline { margin: 0 0 6px; font-size: 12px; }
+#mysqlList .fn .sector { color: var(--muted); font-family: system-ui, sans-serif; font-size: 11px; }
+[data-feed=mysql] .row2 input, [data-feed=mysql] .row2 select { margin-top: 0; }

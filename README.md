@@ -10,6 +10,7 @@ A local web UI for [backtrader](../backtrader): write strategies in the browser,
   - Pick a strategy file and class. The form lists the strategy's `params` as inputs, plus the file's sample options, and applies the file's default feed, dates, cash, commission and sizer.
   - Data feed:
     - **Local file**: the CSV files in `../backtrader/datas` plus your uploads
+    - **MySQL**: daily bars of the securities in the `security_data` database (see [MySQL data feed](#mysql-data-feed))
     - **Yahoo Finance**: any ticker via `yfinance` (daily, weekly, monthly or hourly bars)
     - **Upload**: your own CSV with `Date` or `Datetime` plus `Open,High,Low,Close[,Volume]` columns
   - Date range, starting cash, commission, slippage, cheat-on-close, and a sizer (% of cash or a fixed number of units).
@@ -37,6 +38,20 @@ Environment variables:
 | `PORT`    | `3000`                       | HTTP port |
 | `HOST`    | `127.0.0.1`                  | Bind address. Strategies run arbitrary Python, so keep this on localhost |
 
+## MySQL data feed
+
+The **MySQL** tab of the data feed selector reads daily bars from the local MySQL database `security_data` (S&P 500 constituents):
+
+- **Securities list:** comes from `security` (with the GICS sector) and `security_info`. It shows each ticker's date range and bar count. Filter by ticker or sector.
+- **Prices:** come from `security_price`, using only the version marked as current in `security_info.current_price_version`. Rows without prices are skipped.
+- **Adjusted prices (default):** open, high, low and close are scaled so that close equals `adj_close`, and volume is scaled the other way. This is what backtrader's Yahoo CSV feed does, and it removes jumps caused by splits and dividends. Untick the checkbox to use raw prices.
+
+Connection settings are read from `mysql.config.json` in the project root. The file is git-ignored because it contains the password; `mysql.config.example.json` shows the format. The `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD` and `MYSQL_DATABASE` environment variables override the file. The database user only needs `SELECT` access.
+
+The Python side uses `pymysql`, installed in the backtrader env (`env/bin/pip install pymysql`).
+
+Strategy files can use the database too: `DEFAULTS = dict(feed='mysql:AAPL', ...)` preselects a security, and `ctx.load('mysql:MSFT')` in `configure()` adds another security as a second data feed. For example, the `multidata-strategy` sample runs with its `data1` option set to `mysql:MSFT`.
+
 ## Layout
 
 ```
@@ -46,6 +61,7 @@ public/              Frontend (vanilla JS, CodeMirror 5, TradingView lightweight
 strategies/          Strategy .py files (sub-folders allowed; ported samples live in their sample folder)
 data/uploads/        Uploaded CSV feeds
 runs/                Saved backtest results (JSON)
+mysql.config.json    MySQL connection settings (git-ignored; see mysql.config.example.json)
 tools/               port_samples.py (regenerates the sample ports), test_strategies.py (runs every strategy with its defaults)
 ```
 

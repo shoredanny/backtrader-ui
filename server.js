@@ -27,6 +27,37 @@ const FEED_SOURCES = [
 
 for (const d of [STRAT_DIR, UPLOAD_DIR, RUNS_DIR]) fs.mkdirSync(d, { recursive: true });
 
+// MySQL feed (security_data database): settings from mysql.config.json,
+// overridable with MYSQL_* environment variables
+function loadMysqlConfig() {
+  let cfg = {};
+  const file = path.join(ROOT, 'mysql.config.json');
+  if (fs.existsSync(file)) {
+    try {
+      cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (e) {
+      console.warn(`Ignoring invalid ${file}: ${e.message}`);
+    }
+  }
+  const env = process.env;
+  const merged = {
+    host: env.MYSQL_HOST || cfg.host || 'localhost',
+    port: String(env.MYSQL_PORT || cfg.port || 3306),
+    user: env.MYSQL_USER || cfg.user || '',
+    password: env.MYSQL_PASSWORD ?? cfg.password ?? '',
+    database: env.MYSQL_DATABASE || cfg.database || 'security_data',
+  };
+  return merged.user ? merged : null;
+}
+const MYSQL = loadMysqlConfig();
+const MYSQL_ENV = MYSQL ? {
+  MYSQL_HOST: MYSQL.host,
+  MYSQL_PORT: MYSQL.port,
+  MYSQL_USER: MYSQL.user,
+  MYSQL_PASSWORD: MYSQL.password,
+  MYSQL_DATABASE: MYSQL.database,
+} : {};
+
 const app = express();
 app.use(express.json({ limit: '5mb' }));
 app.use(express.static(path.join(ROOT, 'public')));
@@ -57,7 +88,7 @@ function runPython(args, input, timeoutMs = RUN_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const child = spawn(PYTHON, [RUNNER, ...args], {
       cwd: ROOT,
-      env: { ...process.env, BT_ROOT, MPLBACKEND: 'Agg', PYTHONUNBUFFERED: '1' },
+      env: { ...process.env, ...MYSQL_ENV, BT_ROOT, MPLBACKEND: 'Agg', PYTHONUNBUFFERED: '1' },
     });
     let out = '';
     let err = '';
@@ -243,6 +274,19 @@ app.post('/api/feeds/upload', express.text({ type: '*/*', limit: '100mb' }), wra
   res.json(info);
 }));
 
+// Securities available in the MySQL database (cached: the query scans the
+// whole price table)
+let mysqlCache = null;
+app.get('/api/mysql/securities', wrap(async (req, res) => {
+  if (!MYSQL) return res.json({ ok: false, configured: false, error: 'MySQL is not configured (mysql.config.json)' });
+  if (!mysqlCache || req.query.refresh || Date.now() - mysqlCache.at > 5 * 60 * 1000) {
+    const out = await runPython(['mysql-list'], undefined, 60000);
+    if (!out.ok) return res.json({ ...out, configured: true });
+    mysqlCache = { at: Date.now(), data: out };
+  }
+  res.json({ ...mysqlCache.data, configured: true, database: `${MYSQL.user}@${MYSQL.host}/${MYSQL.database}` });
+}));
+
 app.delete('/api/feeds/uploads/:file', wrap(async (req, res) => {
   const full = resolveFeedPath(`uploads/${req.params.file}`);
   await fsp.unlink(full);
@@ -258,7 +302,15 @@ app.post('/api/backtest', wrap(async (req, res) => {
   let feed;
   let feedLabel;
   let feedName;
-  if (b.feed?.type === 'yahoo') {
+  if (b.feed?.type === 'mysql') {
+    if (!MYSQL) throw httpError(400, 'MySQL is not configured (mysql.config.json)');
+    const ticker = String(b.feed.ticker || '').trim().toUpperCase();
+    if (!/^[A-Z0-9.^=\-]{1,20}$/.test(ticker)) throw httpError(400, 'Invalid ticker');
+    const adjusted = b.feed.adjusted !== false;
+    feed = { type: 'mysql', ticker, adjusted };
+    feedLabel = `MySQL: ${ticker}${adjusted ? ' (adjusted)' : ''}`;
+    feedName = ticker;
+  } else if (b.feed?.type === 'yahoo') {
     const ticker = String(b.feed.ticker || '').trim().toUpperCase();
     if (!/^[A-Z0-9.^=\-]{1,20}$/.test(ticker)) throw httpError(400, 'Invalid ticker');
     const interval = ['1d', '1wk', '1mo', '1h'].includes(b.feed.interval) ? b.feed.interval : '1d';

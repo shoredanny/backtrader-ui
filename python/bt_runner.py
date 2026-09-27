@@ -5,10 +5,17 @@ Usage:
   bt_runner.py inspect <file.py> [<file.py> ...]  -> JSON map path -> info
   bt_runner.py run                                -> JSON config on stdin,
                                                      JSON results on stdout
+  bt_runner.py mysql-list                         -> securities available in
+                                                     the MySQL database
+
+MySQL connection settings come from the environment (the Node server passes
+them from mysql.config.json): MYSQL_HOST, MYSQL_PORT, MYSQL_USER,
+MYSQL_PASSWORD, MYSQL_DATABASE.
 
 Strategy files may declare (all optional, module level):
 
-  DEFAULTS = dict(feed='orcl-1995-2014.txt' | 'yahoo:TICKER[:interval]',
+  DEFAULTS = dict(feed='orcl-1995-2014.txt' | 'yahoo:TICKER[:interval]' |
+                       'mysql:TICKER',
                   fromdate='YYYY-MM-DD', todate='YYYY-MM-DD', cash=100000,
                   commission=0.0, slippage=0.0, coc=False,
                   sizer=dict(type='fixed'|'percent', value=1))
@@ -28,7 +35,8 @@ Strategy files may declare (all optional, module level):
         ctx.fromdate    datetime.date or None
         ctx.todate      datetime.date or None
         ctx.load(src, **kwargs)   another feed: file name in backtrader/datas
-                                  (or uploads) or 'yahoo:TICKER'
+                                  (or uploads), 'yahoo:TICKER' or
+                                  'mysql:TICKER'
         ctx.make_data(**kwargs)   a fresh copy of the selected feed, with
                                   feed params overridden (timeframe, ...)
         ctx.datapath(name)        absolute path of a backtrader/datas file
@@ -302,10 +310,108 @@ def row_datetime(header, row):
     return d
 
 
+# --------------------------------------------------------------------------
+# MySQL (security_data database)
+# --------------------------------------------------------------------------
+def mysql_connect():
+    try:
+        import pymysql
+    except ImportError:
+        raise ImportError('pymysql is not installed in the backtrader env: '
+                          'pip install pymysql')
+    if not os.environ.get('MYSQL_USER'):
+        raise ValueError('MySQL is not configured (mysql.config.json)')
+    return pymysql.connect(
+        host=os.environ.get('MYSQL_HOST', 'localhost'),
+        port=int(os.environ.get('MYSQL_PORT') or 3306),
+        user=os.environ['MYSQL_USER'],
+        password=os.environ.get('MYSQL_PASSWORD', ''),
+        database=os.environ.get('MYSQL_DATABASE', 'security_data'),
+        connect_timeout=10)
+
+
+# Prices of the version marked as current in security_info (older/partial
+# versions are kept in the table too); rows without prices are skipped
+MYSQL_PRICES_SQL = """
+    SELECT p.price_date, p.open, p.high, p.low, p.close, p.volume, p.adj_close
+    FROM security_price p
+    JOIN security_info i
+      ON i.security_ticker = p.security_ticker
+     AND p.version = i.current_price_version
+    WHERE p.security_ticker = %s
+      AND p.price_date >= %s AND p.price_date < %s
+      AND p.open IS NOT NULL AND p.high IS NOT NULL
+      AND p.low IS NOT NULL AND p.close IS NOT NULL
+    ORDER BY p.price_date
+"""
+
+
+def mysql_frame(ticker, fromdate, todate, adjusted=True):
+    import pandas as pd
+
+    start = fromdate or datetime.date(1900, 1, 1)
+    end = (todate or datetime.date(2999, 12, 30)) + datetime.timedelta(days=1)
+    conn = mysql_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(MYSQL_PRICES_SQL, (ticker, start, end))
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        raise ValueError('No MySQL prices for %s in the selected dates'
+                         % ticker)
+    df = pd.DataFrame(rows, columns=['datetime', 'open', 'high', 'low',
+                                     'close', 'volume', 'adj_close'])
+    df = df.set_index(pd.to_datetime(df.pop('datetime')))
+    df = df.astype(float)
+    if adjusted:
+        # scale OHLC (and volume inversely) so close == adj_close, as
+        # backtrader's YahooFinanceCSVData does with adjclose=True
+        factor = (df['adj_close'] / df['close']).where(df['adj_close'] > 0,
+                                                       1.0)
+        for c in ('open', 'high', 'low', 'close'):
+            df[c] = df[c] * factor
+        df['volume'] = df['volume'] / factor
+    return df.drop(columns=['adj_close'])
+
+
+def cmd_mysql_list():
+    try:
+        conn = mysql_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT s.security_ticker, s.gics_sector, s.gics_sub_sector,
+                           MIN(p.price_date), MAX(p.price_date), COUNT(*)
+                    FROM security s
+                    JOIN security_info i
+                      ON i.security_ticker = s.security_ticker
+                    JOIN security_price p
+                      ON p.security_ticker = s.security_ticker
+                     AND p.version = i.current_price_version
+                    WHERE p.close IS NOT NULL
+                    GROUP BY s.security_ticker, s.gics_sector,
+                             s.gics_sub_sector
+                    ORDER BY s.security_ticker""")
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        emit({'ok': True, 'securities': [
+            {'ticker': t, 'sector': sec, 'subSector': sub,
+             'first': a.date().isoformat(), 'last': b.date().isoformat(),
+             'rows': n} for t, sec, sub, a, b, n in rows]})
+    except BaseException as e:
+        emit({'ok': False, 'error': '%s: %s' % (type(e).__name__, e)})
+
+
 def pandas_frame(feed, fromdate, todate):
     import pandas as pd
 
-    if feed['type'] == 'yahoo':
+    if feed['type'] == 'mysql':
+        df = mysql_frame(feed['ticker'], fromdate, todate,
+                         feed.get('adjusted', True))
+    elif feed['type'] == 'yahoo':
         import yfinance as yf
         end = todate + datetime.timedelta(days=1) if todate else None
         df = yf.download(feed['ticker'], start=fromdate, end=end,
@@ -387,6 +493,9 @@ def make_feed(feed, fromdate=None, todate=None, pandas=False, **kwargs):
 
 def resolve_source(src):
     '''"yahoo:TICKER[:interval]" or a file name -> feed spec'''
+    if src.startswith('mysql:'):
+        return {'type': 'mysql', 'ticker': src.split(':')[1],
+                'adjusted': True}
     if src.startswith('yahoo:'):
         parts = src.split(':')
         return {'type': 'yahoo', 'ticker': parts[1],
@@ -428,7 +537,8 @@ class Ctx(object):
     def load(self, src, fromdate=None, todate=None, **kwargs):
         spec = resolve_source(src)
         kwargs.setdefault('name', os.path.splitext(os.path.basename(
-            src.split(':')[1] if src.startswith('yahoo:') else src))[0])
+            src.split(':')[1] if src.startswith(('yahoo:', 'mysql:'))
+            else src))[0])
         return make_feed(spec, fromdate or self.fromdate,
                          todate or self.todate, **kwargs)
 
@@ -875,6 +985,8 @@ def run_backtest(cfg):
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == 'inspect':
         cmd_inspect(sys.argv[2:])
+    elif len(sys.argv) >= 2 and sys.argv[1] == 'mysql-list':
+        cmd_mysql_list()
     elif len(sys.argv) >= 2 and sys.argv[1] == 'run':
         cmd_run(json.loads(sys.stdin.read()))
     else:

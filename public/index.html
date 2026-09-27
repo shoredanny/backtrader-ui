@@ -67,12 +67,22 @@
           <legend>Data feed</legend>
           <div class="seg" id="feedType">
             <button type="button" data-type="file" class="active">Local file</button>
+            <button type="button" data-type="mysql">MySQL</button>
             <button type="button" data-type="yahoo">Yahoo</button>
             <button type="button" data-type="upload">Upload</button>
           </div>
           <div data-feed="file">
             <input type="search" id="feedFilter" placeholder="Filter files…">
             <div id="feedList" class="feed-list"></div>
+          </div>
+          <div data-feed="mysql" hidden>
+            <div class="row2">
+              <input type="search" id="mysqlFilter" placeholder="Ticker or sector…">
+              <select id="mysqlSector"><option value="">All sectors</option></select>
+            </div>
+            <div id="mysqlList" class="feed-list"><div class="feed-item meta">Loading…</div></div>
+            <label class="check inline"><input type="checkbox" id="mysqlAdjusted" checked> Adjust prices with adj_close (splits/dividends)</label>
+            <p class="hint" id="mysqlInfo"></p>
           </div>
           <div data-feed="yahoo" hidden>
             <label>Ticker <input id="fTicker" value="AAPL" placeholder="e.g. AAPL, MSFT, ^GSPC"></label>

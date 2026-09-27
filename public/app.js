@@ -46,6 +46,8 @@ const state = {
   feedType: 'file',
   feedId: null,
   formStrategy: null,   // strategy whose defaults the backtest form shows
+  mysql: null,          // securities in the MySQL database (loaded on demand)
+  mysqlTicker: null,
   charts: [],
   lastResult: null,
 };
@@ -480,7 +482,11 @@ function collectFields(sel) {
 function applyFormDefaults(d) {
   if (!d || !Object.keys(d).length) return;
   if (d.feed) {
-    if (d.feed.startsWith('yahoo:')) {
+    if (d.feed.startsWith('mysql:')) {
+      setFeedType('mysql');
+      state.mysqlTicker = d.feed.split(':')[1];
+      loadMysql().then(renderMysql);
+    } else if (d.feed.startsWith('yahoo:')) {
       const [, ticker, interval] = d.feed.split(':');
       setFeedType('yahoo');
       $('#fTicker').value = ticker;
@@ -513,7 +519,64 @@ function setFeedType(type) {
   state.feedType = type;
   $$('#feedType button').forEach((b) => b.classList.toggle('active', b.dataset.type === type));
   $$('[data-feed]').forEach((el) => (el.hidden = el.dataset.feed !== type));
+  if (type === 'mysql' && !state.mysql) loadMysql();
 }
+
+// ---- MySQL securities (security_data database)
+let mysqlLoading = null;
+function loadMysql(refresh = false) {
+  if (state.mysql && !refresh) return Promise.resolve();
+  if (mysqlLoading) return mysqlLoading;
+  $('#mysqlList').innerHTML = '<div class="feed-item meta">Loading…</div>';
+  mysqlLoading = api(`/api/mysql/securities${refresh ? '?refresh=1' : ''}`).then((r) => {
+    if (!r.ok) {
+      state.mysql = null;
+      $('#mysqlList').innerHTML = `<div class="feed-item meta neg">${esc(r.error)}</div>`;
+      return;
+    }
+    state.mysql = r.securities;
+    $('#mysqlInfo').textContent = `${r.securities.length} securities · ${r.database}`;
+    const sectors = [...new Set(r.securities.map((x) => x.sector))].sort();
+    $('#mysqlSector').innerHTML = '<option value="">All sectors</option>'
+      + sectors.map((x) => `<option>${esc(x)}</option>`).join('');
+    renderMysql();
+  }).catch((err) => {
+    $('#mysqlList').innerHTML = `<div class="feed-item meta neg">${esc(err.message)}</div>`;
+  }).finally(() => { mysqlLoading = null; });
+  return mysqlLoading;
+}
+
+function renderMysql() {
+  if (!state.mysql) return;
+  const q = $('#mysqlFilter').value.trim().toLowerCase();
+  const sector = $('#mysqlSector').value;
+  const list = state.mysql.filter((x) => (!sector || x.sector === sector) && (!q
+    || x.ticker.toLowerCase().includes(q) || x.sector.toLowerCase().includes(q) || x.subSector.toLowerCase().includes(q)));
+  const shown = list.slice(0, 300);
+  $('#mysqlList').innerHTML = shown.map((x) => `
+    <div class="feed-item ${x.ticker === state.mysqlTicker ? 'active' : ''}" data-ticker="${esc(x.ticker)}" title="${esc(x.subSector)}">
+      <div class="fn"><span>${esc(x.ticker)}</span><span class="sector">${esc(x.sector)}</span></div>
+      <div class="meta">${esc(x.first)} → ${esc(x.last)} · ${x.rows.toLocaleString()} bars</div>
+    </div>`).join('')
+    + (list.length > shown.length ? `<div class="feed-item meta">${list.length - shown.length} more: refine the filter</div>` : '')
+    || '<div class="feed-item meta">No match</div>';
+}
+$('#mysqlFilter').addEventListener('input', renderMysql);
+$('#mysqlSector').addEventListener('change', renderMysql);
+
+function selectMysql(ticker, setDates = true) {
+  state.mysqlTicker = ticker;
+  const x = state.mysql?.find((s) => s.ticker === ticker);
+  if (x && setDates) {
+    $('#fFrom').value = x.first;
+    $('#fTo').value = x.last;
+  }
+  renderMysql();
+}
+$('#mysqlList').addEventListener('click', (e) => {
+  const item = e.target.closest('.feed-item[data-ticker]');
+  if (item) selectMysql(item.dataset.ticker);
+});
 $('#feedType').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-type]');
   if (b) setFeedType(b.dataset.type);
@@ -602,7 +665,9 @@ $('#fSizer').addEventListener('change', () => {
 function buildRequest() {
   const feed = state.feedType === 'yahoo'
     ? { type: 'yahoo', ticker: $('#fTicker').value.trim(), interval: $('#fInterval').value }
-    : { type: 'file', id: state.feedId };
+    : state.feedType === 'mysql'
+      ? { type: 'mysql', ticker: state.mysqlTicker, adjusted: $('#mysqlAdjusted').checked }
+      : { type: 'file', id: state.feedId };
   return {
     strategy: $('#fStrategy').value,
     strategyClass: currentClass()?.name,
@@ -625,6 +690,7 @@ $('#btForm').addEventListener('submit', async (e) => {
   if (!req.strategy) return toast('Choose a strategy', true);
   if (req.feed.type === 'file' && !req.feed.id) return toast('Choose a data feed', true);
   if (req.feed.type === 'yahoo' && !req.feed.ticker) return toast('Enter a ticker', true);
+  if (req.feed.type === 'mysql' && !req.feed.ticker) return toast('Choose a security from the MySQL list', true);
   if (state.feedType === 'upload') return toast('Upload a CSV first, or pick a local file', true);
 
   const btn = $('#btnRun');
@@ -925,7 +991,13 @@ async function applyRequest(req) {
   }
   $('#fStrategy').value = req.strategy;
   await onStrategyChange({ values: { cls: req.strategyClass, params: req.params || {}, options: req.options || {} } });
-  if (req.feed?.type === 'yahoo') {
+  if (req.feed?.type === 'mysql') {
+    setFeedType('mysql');
+    state.mysqlTicker = req.feed.ticker;
+    $('#mysqlAdjusted').checked = req.feed.adjusted !== false;
+    await loadMysql();
+    renderMysql();
+  } else if (req.feed?.type === 'yahoo') {
     setFeedType('yahoo');
     $('#fTicker').value = req.feed.ticker;
     $('#fInterval').value = req.feed.interval || '1d';

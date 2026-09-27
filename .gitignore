@@ -3,3 +3,4 @@ runs/
 data/uploads/*
 !data/uploads/.gitkeep
 __pycache__/
+mysql.config.json
