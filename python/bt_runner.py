@@ -7,10 +7,14 @@ Usage:
                                                      JSON results on stdout
   bt_runner.py mysql-list                         -> securities available in
                                                      the MySQL database
+  bt_runner.py news-sentiment                     -> JSON {ticker, from, to}
+                                                     on stdin, scored news
+                                                     articles on stdout
 
 MySQL connection settings come from the environment (the Node server passes
 them from mysql.config.json): MYSQL_HOST, MYSQL_PORT, MYSQL_USER,
-MYSQL_PASSWORD, MYSQL_DATABASE.
+MYSQL_PASSWORD, MYSQL_DATABASE, MYSQL_NEWS_DATABASE (news articles, same
+server).
 
 Strategy files may declare (all optional, module level):
 
@@ -313,7 +317,7 @@ def row_datetime(header, row):
 # --------------------------------------------------------------------------
 # MySQL (security_data database)
 # --------------------------------------------------------------------------
-def mysql_connect():
+def mysql_connect(database=None):
     try:
         import pymysql
     except ImportError:
@@ -326,7 +330,8 @@ def mysql_connect():
         port=int(os.environ.get('MYSQL_PORT') or 3306),
         user=os.environ['MYSQL_USER'],
         password=os.environ.get('MYSQL_PASSWORD', ''),
-        database=os.environ.get('MYSQL_DATABASE', 'security_data'),
+        database=database or os.environ.get('MYSQL_DATABASE',
+                                            'security_data'),
         connect_timeout=10)
 
 
@@ -401,6 +406,45 @@ def cmd_mysql_list():
             {'ticker': t, 'sector': sec, 'subSector': sub,
              'first': a.date().isoformat(), 'last': b.date().isoformat(),
              'rows': n} for t, sec, sub, a, b, n in rows]})
+    except BaseException as e:
+        emit({'ok': False, 'error': '%s: %s' % (type(e).__name__, e)})
+
+
+# Scored articles of a ticker (news_yahoo database). An article can have
+# several summaries (re-scored by another model); the latest one wins.
+NEWS_SQL = """
+    SELECT h.published_date, h.title, h.publisher_name, h.provider_name,
+           h.url, s.sentiment, s.certainty, s.model
+    FROM article_header h
+    JOIN article_summary s ON s.id = h.id
+    WHERE h.ticker = %s
+      AND h.published_date >= %s AND h.published_date < %s
+      AND s.sentiment IS NOT NULL
+      AND s.summary_id = (SELECT MAX(s2.summary_id) FROM article_summary s2
+                          WHERE s2.id = h.id AND s2.sentiment IS NOT NULL)
+    ORDER BY h.published_date
+"""
+
+
+def cmd_news_sentiment(cfg):
+    try:
+        start = parse_date(cfg.get('from')) or datetime.date(1900, 1, 1)
+        end = ((parse_date(cfg.get('to')) or datetime.date(2999, 12, 30))
+               + datetime.timedelta(days=1))
+        conn = mysql_connect(os.environ.get('MYSQL_NEWS_DATABASE',
+                                            'news_yahoo'))
+        try:
+            with conn.cursor() as cur:
+                cur.execute(NEWS_SQL, (cfg['ticker'], start, end))
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        epoch = datetime.datetime(1970, 1, 1)
+        emit({'ok': True, 'articles': [
+            {'time': int((pub - epoch).total_seconds()), 'title': title,
+             'publisher': prov or publ, 'url': url, 'sentiment': sent,
+             'certainty': cert, 'model': model}
+            for pub, title, publ, prov, url, sent, cert, model in rows]})
     except BaseException as e:
         emit({'ok': False, 'error': '%s: %s' % (type(e).__name__, e)})
 
@@ -987,6 +1031,8 @@ def main():
         cmd_inspect(sys.argv[2:])
     elif len(sys.argv) >= 2 and sys.argv[1] == 'mysql-list':
         cmd_mysql_list()
+    elif len(sys.argv) >= 2 and sys.argv[1] == 'news-sentiment':
+        cmd_news_sentiment(json.loads(sys.stdin.read()))
     elif len(sys.argv) >= 2 and sys.argv[1] == 'run':
         cmd_run(json.loads(sys.stdin.read()))
     else:

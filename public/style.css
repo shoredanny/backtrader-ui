@@ -167,6 +167,26 @@ legend { padding: 0 6px; font-weight: 600; font-size: 12px; text-transform: uppe
 .chart-title { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .legend { font-weight: 400; display: inline-flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+.chart-title .toggle { margin-left: auto; font-weight: 400; }
+.btn.toggle[aria-pressed="true"] { border-color: var(--accent); color: #9fbfff; background: rgba(79,140,255,.12); }
+.sentiment-info { font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 200px; }
+.chart-wrap { position: relative; }
+.news-tip {
+  position: absolute; z-index: 5; width: min(460px, calc(100% - 8px)); max-height: 320px; overflow: auto;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.45); font-size: 12px; pointer-events: none;
+}
+.news-tip.pinned { pointer-events: auto; border-color: var(--accent); }
+.news-tip .tip-head { margin-bottom: 6px; color: var(--muted); }
+.news-tip .tip-head b { color: var(--text); }
+.news-tip .tip-row { display: grid; grid-template-columns: 40px 32px 1fr; gap: 6px; padding: 3px 0; border-top: 1px solid var(--border); }
+.news-tip .tip-score { font-family: var(--mono); text-align: right; }
+.news-tip .tip-cert { font-family: var(--mono); color: var(--muted); }
+.news-tip .tip-title a { color: var(--text); text-decoration: none; }
+.news-tip .tip-title a:hover { text-decoration: underline; }
+.news-tip .tip-foot { margin-top: 6px; font-size: 11px; }
+.news-tip .pos, .sentiment-info .pos { color: var(--green); }
+.news-tip .neg, .sentiment-info .neg { color: var(--red); }
 .chart { height: 240px; }
 .chart.tall { height: 420px; }
 .chart.sub { height: 150px; }

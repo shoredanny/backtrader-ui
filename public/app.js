@@ -50,6 +50,9 @@ const state = {
   mysqlTicker: null,
   charts: [],
   lastResult: null,
+  showSentiment: false, // news sentiment overlay on the price chart
+  newsCache: {},        // "ticker|from|to" -> scored articles
+  sentiment: null,      // overlay of the current result's price chart
 };
 
 // ------------------------------------------------------------------ utils
@@ -712,7 +715,10 @@ $('#btForm').addEventListener('submit', async (e) => {
 function clearCharts() {
   state.charts.forEach((c) => c.remove());
   state.charts = [];
+  state.sentiment = null;
   $('#subCharts').innerHTML = '';
+  $('#sentimentInfo').textContent = '';
+  hideNewsTip();
 }
 
 function makeChart(el, intraday) {
@@ -822,6 +828,8 @@ function renderResult(r) {
   if (markers.length > 40) markers.forEach((mk) => delete mk.text);  // too dense to label
   candles.setMarkers(markers);
 
+  setupSentiment(r, price, candles, intraday);
+
   // ---- indicators
   let colorIdx = 0;
   const legend = [];
@@ -873,6 +881,249 @@ function renderResult(r) {
   $('#rLog').textContent = r.log ? r.log + (r.logTruncated ? '\n… (truncated)' : '') : '(no output — use print() in your strategy to log here)';
   showDetailTab('trades');
 }
+
+// ------------------------------------------------- news sentiment overlay
+// News sentiment as bookmarks hanging from the top of the price chart, one
+// per bar with news: color = sign of the certainty-weighted mean sentiment,
+// length = its size (-1..1), opacity = mean certainty (0..1). Hovering a
+// bookmark shows its articles; clicking pins the tooltip so links work.
+// Needs a ticker feed (MySQL/Yahoo).
+const BOOKMARK = { minLen: 12, maxLen: 34, maxWidth: 12, minWidth: 4 };
+
+function sentimentTicker(r) {
+  const f = r.request?.feed;
+  return f && (f.type === 'mysql' || f.type === 'yahoo') ? String(f.ticker || '').toUpperCase() : null;
+}
+
+// Group articles by the bar they fall on: the first bar at or after the
+// article (its day for daily bars, so weekend news lands on Monday)
+function sentimentByBar(bars, articles, intraday) {
+  const out = new Map();
+  let i = 0;
+  for (const a of [...articles].sort((x, y) => x.time - y.time)) {
+    const t = intraday ? a.time : Math.floor(a.time / 86400) * 86400;
+    while (i < bars.length && bars[i].time < t) i++;
+    if (i === bars.length) break;
+    const key = bars[i].time;
+    if (!out.has(key)) out.set(key, []);
+    out.get(key).push(a);
+  }
+  const stats = new Map();
+  out.forEach((list, time) => {
+    const w = list.reduce((acc, a) => acc + (a.certainty ?? 0), 0);
+    const sentiment = w > 0 ? list.reduce((acc, a) => acc + a.sentiment * (a.certainty ?? 0), 0) / w
+      : list.reduce((acc, a) => acc + a.sentiment, 0) / list.length;
+    const certainty = list.reduce((acc, a) => acc + (a.certainty ?? 0), 0) / list.length;
+    stats.set(time, { time, sentiment, certainty, articles: list });
+  });
+  return stats;
+}
+
+const bookmarkRgb = (s) => (s > 0.05 ? '38,166,154' : s < -0.05 ? '239,83,80' : '138,147,166');
+
+// Series primitive drawing the bookmarks on the price pane
+class BookmarkPrimitive {
+  constructor() {
+    this.stats = null;
+    this.visible = false;
+    this.hover = null;   // time of the highlighted bookmark
+    const self = this;
+    this._view = {
+      zOrder: () => 'top',
+      renderer: () => ({ draw: (target) => self._draw(target) }),
+    };
+  }
+  attached({ chart, requestUpdate }) { this.chart = chart; this.requestUpdate = requestUpdate; }
+  detached() { this.chart = null; }
+  update() { this.requestUpdate?.(); }
+  paneViews() { return [this._view]; }
+
+  // bookmark geometry of each visible bar with news (media coordinates)
+  shapes() {
+    if (!this.visible || !this.stats || !this.chart) return [];
+    const ts = this.chart.timeScale();
+    const spacing = ts.options().barSpacing;
+    const w = Math.max(BOOKMARK.minWidth, Math.min(BOOKMARK.maxWidth, spacing * 0.8));
+    const out = [];
+    this.stats.forEach((st) => {
+      const x = ts.timeToCoordinate(st.time);
+      if (x === null) return;
+      const len = BOOKMARK.minLen + (BOOKMARK.maxLen - BOOKMARK.minLen) * Math.min(1, Math.abs(st.sentiment));
+      out.push({ st, x, w, len });
+    });
+    return out;
+  }
+
+  _draw(target) {
+    const shapes = this.shapes();
+    if (!shapes.length) return;
+    target.useMediaCoordinateSpace(({ context: ctx }) => {
+      for (const { st, x, w, len } of shapes) {
+        const hot = st.time === this.hover;
+        const alpha = hot ? 1 : 0.35 + 0.6 * st.certainty;
+        const l = x - w / 2;
+        const notch = Math.min(w * 0.45, 6);
+        ctx.beginPath();
+        ctx.moveTo(l, 0);
+        ctx.lineTo(l + w, 0);
+        ctx.lineTo(l + w, len);
+        ctx.lineTo(x, len - notch);
+        ctx.lineTo(l, len);
+        ctx.closePath();
+        ctx.fillStyle = `rgba(${bookmarkRgb(st.sentiment)},${alpha.toFixed(2)})`;
+        ctx.fill();
+        if (hot) {
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = '#e4e7ee';
+          ctx.stroke();
+        }
+        if (st.articles.length > 1 && w >= 10) {
+          ctx.fillStyle = 'rgba(14,17,22,.85)';
+          ctx.font = '600 9px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillText(st.articles.length > 9 ? '9+' : String(st.articles.length), x, 3);
+        }
+      }
+    });
+  }
+
+  // bookmark under a point (generous hit area for thin bookmarks)
+  hit(point) {
+    if (!point) return null;
+    let best = null;
+    for (const s of this.shapes()) {
+      const dx = Math.abs(point.x - s.x);
+      if (dx <= Math.max(s.w / 2 + 2, 5) && point.y <= s.len + 4 && (!best || dx < best.dx)) best = { ...s, dx };
+    }
+    return best;
+  }
+}
+
+function setupSentiment(r, price, candles, intraday) {
+  const ticker = sentimentTicker(r);
+  const btn = $('#btnSentiment');
+  btn.disabled = !ticker;
+  btn.title = ticker ? `Show ${ticker} news sentiment from the news database as bookmarks on the price chart`
+    : 'News sentiment needs a MySQL or Yahoo ticker feed';
+  const marks = new BookmarkPrimitive();
+  candles.attachPrimitive(marks);
+  const sent = { r, ticker, price, marks, intraday, stats: null, loading: false, pinned: null };
+  state.sentiment = sent;
+  hideNewsTip();
+
+  price.subscribeCrosshairMove((param) => {
+    if (sent.pinned) return;
+    const hit = marks.hit(param.point);
+    setHover(sent, hit);
+  });
+  applySentiment();
+}
+
+function setHover(sent, hit) {
+  const time = hit ? hit.st.time : null;
+  if (sent.marks.hover !== time) {
+    sent.marks.hover = time;
+    sent.marks.update();
+  }
+  if (hit) showNewsTip(sent, hit);
+  else hideNewsTip();
+}
+
+function hideNewsTip() {
+  const tip = $('#newsTip');
+  tip.hidden = true;
+  tip.classList.remove('pinned');
+}
+
+function showNewsTip(sent, { st, x, len }) {
+  const tip = $('#newsTip');
+  const sgn = (v) => `${v > 0 ? '+' : ''}${fmtNum(v)}`;
+  const list = [...st.articles].sort((a, b) => b.time - a.time);
+  const shown = list.slice(0, 8);
+  tip.innerHTML = `
+    <div class="tip-head">${esc(fmtTime(st.time, sent.intraday))} · ${list.length} article${list.length > 1 ? 's' : ''}
+      · sentiment <b class="${signCls(st.sentiment)}">${sgn(st.sentiment)}</b> · certainty <b>${fmtNum(st.certainty)}</b></div>
+    ${shown.map((a) => `<div class="tip-row">
+      <span class="tip-score ${signCls(a.sentiment)}">${sgn(a.sentiment)}</span>
+      <span class="tip-cert" title="certainty">${fmtNum(a.certainty)}</span>
+      <span class="tip-title">${a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a>` : esc(a.title)}
+        <span class="muted">${esc(a.publisher || '')}</span></span>
+    </div>`).join('')}
+    ${list.length > shown.length ? `<div class="muted">+ ${list.length - shown.length} more</div>` : ''}
+    <div class="tip-foot muted">${$('#newsTip').classList.contains('pinned') ? 'Click elsewhere on the chart to close' : 'Click the bookmark to pin and open links'}</div>`;
+  tip.hidden = false;
+  // keep the tooltip inside the chart, below the bookmark
+  const host = $('#priceChart').getBoundingClientRect();
+  const left = Math.max(4, Math.min(x - tip.offsetWidth / 2, host.width - tip.offsetWidth - 4));
+  tip.style.left = `${left}px`;
+  tip.style.top = `${len + 8}px`;
+}
+
+async function loadSentiment(sent) {
+  const { r, ticker } = sent;
+  const day = (t) => new Date(t * 1000).toISOString().slice(0, 10);
+  const from = day(r.bars[0].time);
+  const to = day(r.bars[r.bars.length - 1].time);
+  const key = `${ticker}|${from}|${to}`;
+  if (!state.newsCache[key]) {
+    const out = await api(`/api/news/sentiment?ticker=${encodeURIComponent(ticker)}&from=${from}&to=${to}`);
+    if (!out.ok) throw new Error(out.error);
+    state.newsCache[key] = out.articles;
+  }
+  sent.stats = sentimentByBar(r.bars, state.newsCache[key], sent.intraday);
+  sent.count = state.newsCache[key].length;
+  sent.marks.stats = sent.stats;
+}
+
+// Show/hide the bookmarks of the current result following the toggle
+async function applySentiment() {
+  const sent = state.sentiment;
+  const on = state.showSentiment && !!sent?.ticker;
+  $('#btnSentiment').setAttribute('aria-pressed', String(on));
+  if (!sent) return;
+  sent.marks.visible = on;
+  if (!on) {
+    sent.pinned = null;
+    setHover(sent, null);
+  }
+  if (on && !sent.stats && !sent.loading) {
+    sent.loading = true;
+    $('#sentimentInfo').textContent = `Loading ${sent.ticker} news…`;
+    try {
+      await loadSentiment(sent);
+    } catch (err) {
+      toast(`News sentiment: ${err.message}`, true);
+    } finally {
+      sent.loading = false;
+    }
+    if (state.sentiment !== sent) return;  // another result was opened meanwhile
+  }
+  sent.marks.update();
+  const el = $('#sentimentInfo');
+  if (!on || !sent.stats) el.textContent = '';
+  else el.textContent = sent.count ? `${sent.count} scored ${sent.ticker} articles · hover a bookmark`
+    : `No scored ${sent.ticker} news in this period`;
+}
+
+// Clicking a bookmark pins its tooltip, clicking elsewhere closes it (a DOM
+// listener: the chart's own click event skips quick successive clicks)
+$('#priceChart').addEventListener('click', (e) => {
+  const sent = state.sentiment;
+  if (!sent) return;
+  const rect = $('#priceChart').getBoundingClientRect();
+  const hit = sent.marks.hit({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+  sent.pinned = hit ? hit.st.time : null;
+  $('#newsTip').classList.toggle('pinned', !!hit);
+  setHover(sent, hit);
+});
+
+$('#btnSentiment').addEventListener('click', () => {
+  state.showSentiment = !state.showSentiment;
+  savePref('showSentiment', state.showSentiment);
+  applySentiment();
+});
+state.showSentiment = loadPref('showSentiment', false);
 
 const multiData = (r) => [...r.orders, ...r.trades].some((x) => x.data && x.data !== r.mainData);
 

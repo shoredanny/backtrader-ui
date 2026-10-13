@@ -10,7 +10,7 @@ const crypto = require('crypto');
 const ROOT = __dirname;
 const BT_ROOT = path.resolve(process.env.BT_ROOT || path.join(ROOT, '..', 'backtrader'));
 const PYTHON = process.env.PYTHON || path.join(BT_ROOT, 'env', 'bin', 'python');
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 3100);
 const HOST = process.env.HOST || '127.0.0.1';
 
 const STRAT_DIR = path.join(ROOT, 'strategies');
@@ -46,6 +46,7 @@ function loadMysqlConfig() {
     user: env.MYSQL_USER || cfg.user || '',
     password: env.MYSQL_PASSWORD ?? cfg.password ?? '',
     database: env.MYSQL_DATABASE || cfg.database || 'security_data',
+    newsDatabase: env.MYSQL_NEWS_DATABASE || cfg.newsDatabase || 'news_yahoo',
   };
   return merged.user ? merged : null;
 }
@@ -56,6 +57,7 @@ const MYSQL_ENV = MYSQL ? {
   MYSQL_USER: MYSQL.user,
   MYSQL_PASSWORD: MYSQL.password,
   MYSQL_DATABASE: MYSQL.database,
+  MYSQL_NEWS_DATABASE: MYSQL.newsDatabase,
 } : {};
 
 const app = express();
@@ -285,6 +287,18 @@ app.get('/api/mysql/securities', wrap(async (req, res) => {
     mysqlCache = { at: Date.now(), data: out };
   }
   res.json({ ...mysqlCache.data, configured: true, database: `${MYSQL.user}@${MYSQL.host}/${MYSQL.database}` });
+}));
+
+// News articles of a ticker with their sentiment/certainty scores (news
+// database), for the sentiment overlay of the price chart
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+app.get('/api/news/sentiment', wrap(async (req, res) => {
+  if (!MYSQL) return res.json({ ok: false, error: 'MySQL is not configured (mysql.config.json)' });
+  const ticker = String(req.query.ticker || '').trim().toUpperCase();
+  if (!/^[A-Z0-9.^=\-]{1,20}$/.test(ticker)) throw httpError(400, 'Invalid ticker');
+  const from = DATE_RE.test(req.query.from) ? req.query.from : null;
+  const to = DATE_RE.test(req.query.to) ? req.query.to : null;
+  res.json(await runPython(['news-sentiment'], { ticker, from, to }, 60000));
 }));
 
 app.delete('/api/feeds/uploads/:file', wrap(async (req, res) => {

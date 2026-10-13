@@ -26,7 +26,7 @@ A local web UI for [backtrader](../backtrader): write strategies in the browser,
 ```bash
 cd ~/Project/backtrader-ui
 npm install      # first time only
-npm start        # http://127.0.0.1:3000
+npm start        # http://127.0.0.1:3100
 ```
 
 Environment variables:
@@ -35,7 +35,7 @@ Environment variables:
 |-----------|------------------------------|---------|
 | `BT_ROOT` | `../backtrader`              | backtrader checkout: gets priority on the Python path, and its `datas/` folder is listed as a data source |
 | `PYTHON`  | `$BT_ROOT/env/bin/python`    | Python with backtrader, pandas and yfinance installed |
-| `PORT`    | `3000`                       | HTTP port |
+| `PORT`    | `3100`                       | HTTP port |
 | `HOST`    | `127.0.0.1`                  | Bind address. Strategies run arbitrary Python, so keep this on localhost |
 
 ## MySQL data feed
@@ -51,6 +51,17 @@ Connection settings are read from `mysql.config.json` in the project root. The f
 The Python side uses `pymysql`, installed in the backtrader env (`env/bin/pip install pymysql`).
 
 Strategy files can use the database too: `DEFAULTS = dict(feed='mysql:AAPL', ...)` preselects a security, and `ctx.load('mysql:MSFT')` in `configure()` adds another security as a second data feed. For example, the `multidata-strategy` sample runs with its `data1` option set to `mysql:MSFT`.
+
+## News sentiment overlay
+
+The **News sentiment** button above the price chart shows scores from the `news_yahoo` database (same MySQL server and user, which needs `SELECT` access to it) for the backtested ticker:
+
+- **Articles:** `article_header` rows whose `ticker` matches the feed's ticker, joined to their `article_summary` scores. If an article was summarized more than once, the latest scored summary is used.
+- **Display:** bookmarks hang from the top edge of the price chart, one for each bar that has news. The color is the sign of the certainty-weighted mean `sentiment` (green positive, red negative, grey near zero). The length is its size (-1 to 1), and the opacity is the mean `certainty` (0 to 1). An article counts toward the first bar on or after its publish date, so weekend news lands on Monday.
+- **Hover:** hovering a bookmark shows a tooltip with the day's scores and its articles (sentiment, certainty, title, publisher). Click the bookmark to pin the tooltip and open article links. Click elsewhere on the chart to close it.
+- **Feeds:** only MySQL and Yahoo feeds have a ticker. The button is disabled for file feeds. The on/off choice is remembered in the browser.
+
+Set `newsDatabase` in `mysql.config.json` (or `MYSQL_NEWS_DATABASE`) to use another database name.
 
 ## Layout
 
